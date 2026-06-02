@@ -1,0 +1,14 @@
+{
+  "name": "amocrm-duplicate-control",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.8.4",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  }
+}
