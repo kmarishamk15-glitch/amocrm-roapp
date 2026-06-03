@@ -364,4 +364,3 @@ app.listen(
       "Server started"
     )
 );
-```
