@@ -1,6 +1,7 @@
+```javascript
 import express from "express";
-import dotenv from "dotenv";
 import axios from "axios";
+import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -13,12 +14,13 @@ const {
   AMO_DOMAIN,
   AMO_TOKEN,
   PIPELINE_ID,
-  SUCCESS_STATUS_ID,
-  REPEAT_CONTACT_STATUS_ID,
-  NEW_SUCCESS_LEAD_STATUS_ID,
   PHONE_FIELD_ID,
   RGP_USER_ID
 } = process.env;
+
+const SUCCESS_STATUS_ID = 142;
+const FAILED_STATUS_ID = 143;
+const TARGET_STATUS_ID = 47054479;
 
 const api = axios.create({
   baseURL: `https://${AMO_DOMAIN}.amocrm.ru/api/v4`,
@@ -31,17 +33,17 @@ const api = axios.create({
 function normalizePhone(phone) {
   if (!phone) return null;
 
-  let value = String(phone).replace(/\D/g, "");
+  let p = String(phone).replace(/\D/g, "");
 
-  if (value.startsWith("8")) {
-    value = "7" + value.substring(1);
+  if (p.startsWith("8")) {
+    p = "7" + p.slice(1);
   }
 
-  return value;
+  return p;
 }
 
-async function getLead(leadId) {
-  const { data } = await api.get(`/leads/${leadId}`, {
+async function getLead(id) {
+  const { data } = await api.get(`/leads/${id}`, {
     params: {
       with: "contacts"
     }
@@ -50,16 +52,16 @@ async function getLead(leadId) {
   return data;
 }
 
-async function getContact(contactId) {
-  const { data } = await api.get(`/contacts/${contactId}`);
-
+async function getContact(id) {
+  const { data } = await api.get(`/contacts/${id}`);
   return data;
 }
 
 function getPhoneFromContact(contact) {
-  const field = contact.custom_fields_values?.find(
-    f => Number(f.field_id) === Number(PHONE_FIELD_ID)
-  );
+  const field =
+    contact.custom_fields_values?.find(
+      x => Number(x.field_id) === Number(PHONE_FIELD_ID)
+    );
 
   if (!field?.values?.length) {
     return null;
@@ -69,7 +71,8 @@ function getPhoneFromContact(contact) {
 }
 
 async function getPhoneFromLead(lead) {
-  const contactId = lead._embedded?.contacts?.[0]?.id;
+  const contactId =
+    lead._embedded?.contacts?.[0]?.id;
 
   if (!contactId) {
     return null;
@@ -78,16 +81,6 @@ async function getPhoneFromLead(lead) {
   const contact = await getContact(contactId);
 
   return getPhoneFromContact(contact);
-}
-
-async function getContactLeads(contactId) {
-  const { data } = await api.get(`/contacts/${contactId}`, {
-    params: {
-      with: "leads"
-    }
-  });
-
-  return data._embedded?.leads || [];
 }
 
 async function moveLead(leadId, statusId) {
@@ -103,174 +96,273 @@ async function deleteLead(leadId) {
   await api.delete(`/leads/${leadId}`);
 }
 
-async function createTask(leadId, responsibleUserId, text) {
-  const completeTill =
-    Math.floor(Date.now() / 1000) + 3600;
-
+async function createTask(
+  leadId,
+  responsibleId,
+  text
+) {
   await api.post("/tasks", [
     {
       text,
       entity_id: Number(leadId),
       entity_type: "leads",
-      responsible_user_id: Number(responsibleUserId),
-      complete_till: completeTill
+      responsible_user_id: Number(responsibleId),
+      complete_till:
+        Math.floor(Date.now() / 1000) + 3600
     }
   ]);
 }
 
-function daysBetween(unixCreatedAt) {
-  return (
-    (Date.now() - unixCreatedAt * 1000) /
-    (1000 * 60 * 60 * 24)
-  );
+async function findAllLeadsByPhone(phone) {
+
+  const result = [];
+
+  const search = await api.get("/contacts", {
+    params: {
+      query: phone
+    }
+  });
+
+  const contacts =
+    search.data?._embedded?.contacts || [];
+
+  for (const contact of contacts) {
+
+    const contactPhone =
+      normalizePhone(
+        getPhoneFromContact(contact)
+      );
+
+    if (contactPhone !== phone) {
+      continue;
+    }
+
+    const fullContact = await api.get(
+      `/contacts/${contact.id}`,
+      {
+        params: {
+          with: "leads"
+        }
+      }
+    );
+
+    const leads =
+      fullContact.data?._embedded?.leads || [];
+
+    for (const lead of leads) {
+
+      try {
+
+        const fullLead =
+          await getLead(lead.id);
+
+        result.push(fullLead);
+
+      } catch (e) {
+        console.error(
+          "Lead load error:",
+          lead.id
+        );
+      }
+    }
+  }
+
+  return result;
 }
 
-app.post("/webhook", async (req, res) => {
-  try {
-    const leadId =
-      req.body?.leads?.add?.[0]?.id ||
-      req.body?.leads?.status?.[0]?.id;
+async function processLead(newLead) {
 
-    if (!leadId) {
-      return res.sendStatus(200);
-    }
+  const phone =
+    await getPhoneFromLead(newLead);
 
-    await new Promise(resolve =>
-      setTimeout(resolve, 5000)
+  if (!phone) {
+    console.log("phone not found");
+    return;
+  }
+
+  const normalizedPhone =
+    normalizePhone(phone);
+
+  const allLeads =
+    await findAllLeadsByPhone(
+      normalizedPhone
     );
 
-    const newLead = await getLead(leadId);
+  const candidates = [];
+
+  for (const lead of allLeads) {
 
     if (
-      Number(newLead.pipeline_id) !==
+      Number(lead.id) ===
+      Number(newLead.id)
+    ) {
+      continue;
+    }
+
+    if (
+      Number(lead.pipeline_id) !==
       Number(PIPELINE_ID)
     ) {
-      return res.sendStatus(200);
+      continue;
     }
 
-    const contactId =
-      newLead._embedded?.contacts?.[0]?.id;
+    const diffDays =
+      (newLead.created_at -
+        lead.created_at) /
+      86400;
 
-    if (!contactId) {
-      return res.sendStatus(200);
+    if (diffDays < 0) {
+      continue;
     }
 
-    const phone = await getPhoneFromLead(newLead);
-
-    if (!phone) {
-      return res.sendStatus(200);
+    if (diffDays > 30) {
+      continue;
     }
 
-    const normalizedPhone =
-      normalizePhone(phone);
+    candidates.push(lead);
+  }
 
-    const relatedLeads =
-      await getContactLeads(contactId);
+  if (!candidates.length) {
+    console.log(
+      "no leads in last 30 days"
+    );
+    return;
+  }
 
-    const nonSuccessLeads = [];
-    let hasSuccessfulLead = false;
+  candidates.sort(
+    (a, b) =>
+      a.created_at - b.created_at
+  );
 
-    for (const shortLead of relatedLeads) {
-      if (
-        Number(shortLead.id) ===
-        Number(newLead.id)
-      ) {
-        continue;
-      }
+  const oldestLead =
+    candidates[0];
 
-      const lead = await getLead(shortLead.id);
+  if (
+    Number(oldestLead.status_id) ===
+    FAILED_STATUS_ID
+  ) {
 
-      if (
-        Number(lead.pipeline_id) !==
-        Number(PIPELINE_ID)
-      ) {
-        continue;
-      }
+    await deleteLead(newLead.id);
 
-      const leadPhone =
-        await getPhoneFromLead(lead);
-
-      if (!leadPhone) {
-        continue;
-      }
-
-      if (
-        normalizePhone(leadPhone) !==
-        normalizedPhone
-      ) {
-        continue;
-      }
-
-      if (
-        Number(lead.status_id) ===
-        Number(SUCCESS_STATUS_ID)
-      ) {
-        hasSuccessfulLead = true;
-        continue;
-      }
-
-      nonSuccessLeads.push(lead);
-    }
-
-    const firstNonSuccessLead =
-      nonSuccessLeads.sort(
-        (a, b) => a.created_at - b.created_at
-      )[0];
-
-    if (firstNonSuccessLead) {
-      const days =
-        daysBetween(firstNonSuccessLead.created_at);
-
-      if (days <= 30) {
-        await deleteLead(newLead.id);
-
-        await moveLead(
-          firstNonSuccessLead.id,
-          REPEAT_CONTACT_STATUS_ID
-        );
-
-        const taskText =
-          "Повторное обращение клиента в течение 30 дней. Необходимо связаться с клиентом.";
-
-        await createTask(
-          firstNonSuccessLead.id,
-          firstNonSuccessLead.responsible_user_id,
-          taskText
-        );
-
-        await createTask(
-          firstNonSuccessLead.id,
-          RGP_USER_ID,
-          taskText
-        );
-
-        return res.sendStatus(200);
-      }
-    }
-
-    if (hasSuccessfulLead) {
-      await moveLead(
-        newLead.id,
-        NEW_SUCCESS_LEAD_STATUS_ID
-      );
-    }
-
-    return res.sendStatus(200);
-  } catch (error) {
-    console.error(
-      error?.response?.data || error.message
+    await moveLead(
+      oldestLead.id,
+      TARGET_STATUS_ID
     );
 
-    return res.sendStatus(200);
+    const taskText =
+      "Повторное обращение клиента в течение 30 дней.";
+
+    await createTask(
+      oldestLead.id,
+      oldestLead.responsible_user_id,
+      taskText
+    );
+
+    await createTask(
+      oldestLead.id,
+      Number(RGP_USER_ID),
+      taskText
+    );
+
+    console.log(
+      "duplicate processed"
+    );
+
+    return;
   }
-});
 
-app.get("/", (_, res) => {
-  res.send("OK");
-});
+  if (
+    Number(oldestLead.status_id) ===
+    SUCCESS_STATUS_ID
+  ) {
 
-const PORT = process.env.PORT || 3000;
+    await moveLead(
+      newLead.id,
+      TARGET_STATUS_ID
+    );
 
-app.listen(PORT, () => {
-  console.log(`Server started on ${PORT}`);
-});
+    console.log(
+      "successful lead found"
+    );
+
+    return;
+  }
+}
+
+app.post(
+  "/webhook",
+  async (req, res) => {
+
+    try {
+
+      console.log(
+        "Webhook:",
+        JSON.stringify(
+          req.body,
+          null,
+          2
+        )
+      );
+
+      const leadId =
+        req.body?.leads?.add?.[0]?.id ||
+        req.body?.leads?.status?.[0]?.id;
+
+      if (!leadId) {
+        return res.sendStatus(200);
+      }
+
+      await new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            5000
+          )
+      );
+
+      const newLead =
+        await getLead(leadId);
+
+      if (
+        Number(
+          newLead.pipeline_id
+        ) !==
+        Number(
+          PIPELINE_ID
+        )
+      ) {
+        return res.sendStatus(200);
+      }
+
+      await processLead(
+        newLead
+      );
+
+      return res.sendStatus(200);
+
+    } catch (e) {
+
+      console.error(
+        e.response?.data ||
+        e.message
+      );
+
+      return res.sendStatus(200);
+    }
+  }
+);
+
+app.get(
+  "/",
+  (_, res) =>
+    res.send("OK")
+);
+
+app.listen(
+  process.env.PORT || 3000,
+  () =>
+    console.log(
+      "Server started"
+    )
+);
+```
