@@ -229,7 +229,7 @@ async function processLead(newLead) {
   if (Number(oldestLead.status_id) === FAILED_STATUS_ID) {
     console.log("    ⚡ ACTION: Oldest is FAILED. Restoring old, deleting new.");
     try {
-      await deleteLead(newLead.id);
+      // await deleteLead(newLead.id);
       await moveLead(oldestLead.id, TARGET_STATUS_ID);
       
       const taskText = "Повторное обращение клиента (возврат из отказа).";
