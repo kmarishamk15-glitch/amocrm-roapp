@@ -16,7 +16,8 @@ const {
   AMO_TOKEN,
   PIPELINE_ID,
   PHONE_FIELD_ID,
-  RGP_USER_ID
+  RGP_USER_ID_1,
+  RGP_USER_ID_2
 } = process.env;
 
 if (!AMO_DOMAIN || !AMO_TOKEN || !PIPELINE_ID || !PHONE_FIELD_ID) {
@@ -228,31 +229,70 @@ async function processLead(newLead) {
   // 5. Действия в зависимости от статуса старого лида
   if (Number(oldestLead.status_id) === FAILED_STATUS_ID) {
     console.log("    ⚡ ACTION: Oldest is FAILED. Restoring old, deleting new.");
+
     try {
-      // await deleteLead(newLead.id);
       await moveLead(oldestLead.id, TARGET_STATUS_ID);
-      
+
       const taskText = "Повторное обращение клиента (возврат из отказа).";
-      await createTask(oldestLead.id, oldestLead.responsible_user_id, taskText);
-      if (RGP_USER_ID) {
-        await createTask(oldestLead.id, Number(RGP_USER_ID), taskText);
+
+      await createTask(
+        oldestLead.id,
+        oldestLead.responsible_user_id,
+        taskText
+      );
+
+      if (RGP_USER_ID_1) {
+        await createTask(
+          oldestLead.id,
+          Number(RGP_USER_ID_1),
+          taskText
+        );
       }
+
+      if (RGP_USER_ID_2) {
+        await createTask(
+          oldestLead.id,
+          Number(RGP_USER_ID_2),
+          taskText
+        );
+      }
+
+      // Если нужно удалить новый лид — раскомментируйте:
+      // await deleteLead(newLead.id);
+
     } catch (e) {
-      console.error("❌ Critical error processing FAILED duplicate:", e);
+      console.error(
+        "❌ Critical error processing FAILED duplicate:",
+        e
+      );
     }
 
   } else if (Number(oldestLead.status_id) === SUCCESS_STATUS_ID) {
     console.log("    ⚡ ACTION: Oldest is SUCCESS. Moving new to target status.");
+
     try {
       await moveLead(newLead.id, TARGET_STATUS_ID);
-      const taskText = "Повторное обращение клиента (уже была успешная сделка).";
-      await createTask(newLead.id, newLead.responsible_user_id, taskText);
+
+      const taskText =
+        "Повторное обращение клиента (уже была успешная сделка).";
+
+      await createTask(
+        newLead.id,
+        newLead.responsible_user_id,
+        taskText
+      );
+
     } catch (e) {
-      console.error("❌ Critical error processing SUCCESS duplicate:", e);
+      console.error(
+        "❌ Critical error processing SUCCESS duplicate:",
+        e
+      );
     }
 
   } else {
-    console.log(`    ️ SKIP: Oldest lead status (${oldestLead.status_id}) is not Failed or Success.`);
+    console.log(
+      `    ️ SKIP: Oldest lead status (${oldestLead.status_id}) is not Failed or Success.`
+    );
   }
 }
 
@@ -277,33 +317,32 @@ app.post("/webhook", async (req, res) => {
     console.log(`NEW LEAD WEBHOOK: ${leadId}`);
 
     // Небольшая задержка для гарантированного сохранения данных в БД amoCRM
-   let newLead = null;
+    let newLead = null;
 
-  for (let i = 0; i < 5; i++) {
-  
-    newLead = await getLead(leadId);
-  
-    if (
-      newLead &&
-      newLead._embedded?.contacts?.length
-    ) {
-      break;
+    for (let i = 0; i < 5; i++) {
+      newLead = await getLead(leadId);
+
+      if (
+        newLead &&
+        newLead._embedded?.contacts?.length
+      ) {
+        break;
+      }
+
+      await new Promise(resolve =>
+        setTimeout(resolve, 1000)
+      );
     }
-  
-    await new Promise(resolve =>
-      setTimeout(resolve, 1000)
-    );
-  }
-  
-  if (!newLead) {
-    console.log("Lead not found");
-    return res.sendStatus(200);
-  }
-  
-  if (!newLead._embedded?.contacts?.length) {
-    console.log("Contact not attached yet");
-    return res.sendStatus(200);
-  }
+
+    if (!newLead) {
+      console.log("Lead not found");
+      return res.sendStatus(200);
+    }
+
+    if (!newLead._embedded?.contacts?.length) {
+      console.log("Contact not attached yet");
+      return res.sendStatus(200);
+    }
 
     // Запускаем обработку асинхронно, чтобы быстро ответить amoCRM
     processLead(newLead).catch(err => console.error("Unhandled processLead error:", err));
